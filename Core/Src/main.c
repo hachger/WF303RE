@@ -23,6 +23,7 @@
 /* USER CODE BEGIN Includes */
 #include "utils.h"
 #include <string.h>
+#include "ESP01.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -37,16 +38,19 @@
 #define ESP01DEBUG		flag1.bit.b2
 #define CONTAVERAGE		flag1.bit.b3
 
-#define LEDIDLE			0x80000000
-#define LEDTXANALOG		0xEA000000
-#define LEDESP01DBG		0xEAEAEA00
+#define LEDIDLE				0xE8000000
+#define LEDTXANALOG			0xE8A00000
+#define LEDESP01DBG			0xEAEAEAEA
+#define LEDWIFIDISCONNECTED	0x0000EE00
+#define LEDWIFICONNECTED	0x0000EEA0
 
 #define ADCDATASIZE		256
 
 #define RXBUFSIZE		256
 #define TXBUFSIZE		256
-#define RXESP01BUFSIZE	256
-#define TXESP01BUFSIZE	512
+#define RXESP01BUFSIZE	128
+#define TXESP01BUFSIZE	128
+
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -72,10 +76,12 @@ _uWork w, w1;
 _sRx RX, RXESP01;
 _sTx TX, TXESP01;
 
-char strAux[32];
+char strAux[32], ssid[48], password[32], remoteIP[16];
+uint16_t remotePort, localPort;
 
-uint8_t bufRX[RXBUFSIZE], bufRXESP01[RXESP01BUFSIZE];
+uint8_t bufRX[RXBUFSIZE], bufRXESP01[RXESP01BUFSIZE], auxDataRXESP01;
 uint8_t bufTX[TXBUFSIZE], bufTXESP01[TXESP01BUFSIZE];
+uint16_t timeOutSendAlive;
 
 
 uint16_t ADCData[ADCDATASIZE][8];
@@ -119,6 +125,12 @@ uint8_t GetByteFromRx(_sRx *RX, int8_t pre, int8_t pos);
 void GetBufFromRx(_sRx *RX, uint8_t *buf, int length);
 void DecodeCmd(_sRx *RX, _sTx *TX);
 void Do100ms();
+
+void ESP01ChEN(uint32_t value);
+void ESP01DatagramReady(uint8_t *buf, uint16_t length);
+void ESP01WIFIConnected();
+void ESP01WIFIDisconnected();
+void ESP01UDPReady();
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -201,11 +213,13 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart){
 	}
 	if(huart->Instance == USART3){
 		if(ESP01DEBUG){
-			PutByteOnTx(&TX, RXESP01.buf[RXESP01.iw]);
+			PutByteOnTx(&TX, auxDataRXESP01);
 		}
-		RXESP01.iw++;
-		RXESP01.iw &= RXESP01.maskSize;
-		HAL_UART_Receive_IT(&huart3, &RXESP01.buf[RXESP01.iw], 1);
+		ESP01SetRxByte(auxDataRXESP01);
+		HAL_UART_Receive_IT(&huart3, &auxDataRXESP01, 1);
+//		RXESP01.iw++;
+//		RXESP01.iw &= RXESP01.maskSize;
+//		HAL_UART_Receive_IT(&huart3, &RXESP01.buf[RXESP01.iw], 1);
 	}
 }
 
@@ -518,7 +532,54 @@ void DecodeCmd(_sRx *RX, _sTx *TX){
    		ledStatus = LEDESP01DBG;
    		countPlus = 0;
     	break;
-    case 0xB1:
+    case 0xB1://SET WIFI SSID and PASSWORD
+    	for(w.u8[0] = 0; w.u8[0] < 48; w.u8[0]++){
+    		w.u8[1] = GetByteFromRx(RX, 1, 0);
+    		ssid[w.u8[0]] = w.u8[1];
+    		if(w.u8[1] == '\0')
+    			break;
+    	}
+		ssid[47] = '\0';
+    	for(w.u8[0] = 0; w.u8[0] < 32; w.u8[0]++){
+    		w.u8[1] = GetByteFromRx(RX, 1, 0);
+    		password[w.u8[0]] = w.u8[1];
+    		if(w.u8[1] == '\0')
+    			break;
+    	}
+		password[31] = '\0';
+    	ESP01SetWIFI(ssid, password);
+    	PutHeaderOnTx(TX, 0xB1, 48+32+1);
+    	PutBufOnTx(TX, (uint8_t *)ssid, 48);
+    	PutBufOnTx(TX, (uint8_t *)password, 32);
+    	PutByteOnTx(TX, TX->cks);
+    	break;
+    case 0xB2://SET RemoteIP, RemotePort and LocalPort
+    	if(ESP01GetLastSTATE() == ESP01WIFIDISCONNECTED){
+    		PutHeaderOnTx(TX, 0xB2, 2);
+    		PutByteOnTx(TX, 0xFF);
+    		PutByteOnTx(TX, TX->cks);
+    		break;
+    	}
+    	for(w.u8[0] = 0; w.u8[0] < 16; w.u8[0]++){
+    		w.u8[1] = GetByteFromRx(RX, 1, 0);
+    		remoteIP[w.u8[0]] = w.u8[1];
+    		if(w.u8[1] == '\0')
+    			break;
+    	}
+		remoteIP[15] = '\0';
+		w.u8[0] = GetByteFromRx(RX, 1, 0);
+		w.u8[1] = GetByteFromRx(RX, 1, 0);
+		w.u8[2] = GetByteFromRx(RX, 1, 0);
+		w.u8[3] = GetByteFromRx(RX, 1, 0);
+		remotePort = w.u16[0];
+		localPort = w.u16[1];
+		ESP01ConnectUDP(remoteIP, remotePort, localPort);
+		PutHeaderOnTx(TX, 0xB2, 22);
+		PutByteOnTx(TX, 0x0D);
+		PutBufOnTx(TX, (uint8_t *)remoteIP, 16);
+		PutBufOnTx(TX, (uint8_t *)&remotePort, 2);
+		PutBufOnTx(TX, (uint8_t *)&localPort, 2);
+		PutByteOnTx(TX, TX->cks);
     	break;
     case 0xF0://ALIVE
     	PutHeaderOnTx(TX, 0xF0, 2);
@@ -559,8 +620,44 @@ void Do100ms(){
 			__HAL_TIM_SET_COMPARE(&htim3, TIM_CHANNEL_4, 0);
 		}
 	}
+
+	if(timeOutSendAlive){
+		timeOutSendAlive--;
+		if(!timeOutSendAlive){
+			timeOutSendAlive = 200;
+			TX.cks = 0;
+			PutHeaderOnTx(&TX, 0xF0, 2);
+			PutByteOnTx(&TX, 0x0D);
+			PutByteOnTx(&TX, TX.cks);
+			TXESP01.cks = 0;
+			PutHeaderOnTx(&TXESP01, 0xF0, 2);
+			PutByteOnTx(&TXESP01, 0x0D);
+			PutByteOnTx(&TXESP01, TXESP01.cks);
+		}
+	}
 }
 
+
+void ESP01ChEN(uint32_t value){
+	HAL_GPIO_WritePin(CH_ENA_GPIO_Port, CH_ENA_Pin, value);
+}
+
+void ESP01DatagramReady(uint8_t *buf, uint16_t length){
+	for(uint16_t i=0; i<length; i++)
+		RXESP01.buf[RXESP01.iw++] = buf[i];
+}
+
+void ESP01WIFIConnected(){
+	PutStrOntx(&TX, "+&DBGWIFI Connected\n");
+}
+
+void ESP01WIFIDisconnected(){
+	PutStrOntx(&TX, "+&DBGWIFI Disconnected\n");
+}
+
+void ESP01UDPReady(){
+	PutStrOntx(&TX, "+&DBGUDP Connected\n");
+}
 
 
 /* USER CODE END 0 */
@@ -636,7 +733,7 @@ int main(void)
   indexADCData = 0;
   HAL_TIM_Base_Start_IT(&htim1);
   HAL_UART_Receive_IT(&huart2, &RX.buf[RX.iw], 1);
-  HAL_UART_Receive_IT(&huart3, &RXESP01.buf[RXESP01.iw], 1);
+  HAL_UART_Receive_IT(&huart3, &auxDataRXESP01, 1);
 
   HAL_TIM_Base_Start(&htim3);
   HAL_TIM_PWM_Start(&htim3, TIM_CHANNEL_1);
@@ -653,6 +750,11 @@ int main(void)
   /* USER CODE BEGIN WHILE */
 
   HAL_GPIO_WritePin(CH_ENA_GPIO_Port, CH_ENA_Pin, GPIO_PIN_SET);
+  ESP01Init((ESP01GpioWriteCH_EN *)&ESP01ChEN, (ESP01OnUDPData *)&ESP01DatagramReady);
+  ESP01AttachOnWIFIConnected((ESP01OnWIFIConnected *)&ESP01WIFIConnected);
+  ESP01AttachOnWIFIDisconnected((ESP01OnWIFIDisconnected *)&ESP01WIFIDisconnected);
+  ESP01AttachOnUDPReady((ESP01OnUDPReady *)&ESP01UDPReady);
+
 
   lastTickValue = HAL_GetTick();
 
@@ -681,6 +783,8 @@ int main(void)
 			  if(!timeOutPlus)
 				  countPlus = 0;
 		  }
+
+
 	  }
 
 	  if(RX.ISCMD)
@@ -688,6 +792,12 @@ int main(void)
 
 	  if(RX.ir != RX.iw)
 		  DecodeHeader(&RX);
+
+	  if(RXESP01.ISCMD)
+		  DecodeCmd(&RXESP01, &TXESP01);
+
+	  if(RXESP01.ir != RXESP01.iw)
+		  DecodeHeader(&RXESP01);
 
 	  if(ANALOGREADY){
 		  ANALOGREADY = 0;
@@ -736,12 +846,31 @@ int main(void)
 		  }
 	  }
 
-	  if(TXESP01.ir != TXESP01.iw){
-		  if(__HAL_UART_GET_FLAG(&huart3, UART_FLAG_TXE)){
-			  huart3.Instance->TDR = TXESP01.buf[TXESP01.ir++];
-			  TXESP01.ir &= TXESP01.maskSize;
+	  if(ESP01DEBUG){
+		  if(TXESP01.ir != TXESP01.iw){
+			  if(__HAL_UART_GET_FLAG(&huart3, UART_FLAG_TXE)){
+				  huart3.Instance->TDR = TXESP01.buf[TXESP01.ir++];
+				  TXESP01.ir &= TXESP01.maskSize;
+			  }
 		  }
 	  }
+	  else{
+		  if(TXESP01.iw != TXESP01.ir){
+			  w.u16[0] = TXESP01.iw - TXESP01.ir;
+			  if(ESP01SendUDPData(&TXESP01.buf[TXESP01.ir], w.u16[0], TXESP01BUFSIZE))
+				  TXESP01.iw = TXESP01.ir;
+		  }
+
+		  if(ESP01HasByteToTx()){
+			  if(__HAL_UART_GET_FLAG(&huart3, UART_FLAG_TXE)){
+				  if(ESP01GetTxByte(&w.u8[0]))
+					  huart3.Instance->TDR = w.u8[0];
+			  }
+		  }
+	  }
+
+
+	  ESP01Task();
 
   }
   /* USER CODE END 3 */
