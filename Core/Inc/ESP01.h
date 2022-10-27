@@ -32,7 +32,6 @@ void ESP01Init(ESP01GpioWriteCH_EN *aESP01GpioWriteCH_EN, ESP01OnUDPData *aESP01
 uint8_t ESP01SetWIFI(char *aSSID, char *aPASSWORD);
 uint8_t ESP01ConnectUDP(char *aRemoteIP, uint16_t aRemotePort, uint16_t aLocalPort);
 void ESP01SetRxByte(uint8_t value);
-uint8_t ESP01HasByteToTx();
 uint8_t ESP01GetTxByte(uint8_t *value);
 uint8_t ESP01SendUDPData(uint8_t *buf, uint16_t dataLength, uint16_t bufSize);
 void ESP01Task();

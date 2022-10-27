@@ -15,6 +15,7 @@ typedef enum{
 	STESP01ATCWJAP,
 	STESP01ATCIFSR,
 	STESP01ATCLOSE,
+	STESP01ATCLOSE1,
 	STESP01ATCIPSTART,
 	STESP01ATCONNECTED,
 	STESP01HARDRESET,
@@ -96,6 +97,14 @@ static int aux = 0;
 void ESP01Init(ESP01GpioWriteCH_EN *aESP01GpioWriteCH_EN, ESP01OnUDPData *aESP01OnUDPData){
 	doESP01GpioWriteCH_EN = aESP01GpioWriteCH_EN;
 	doESP01OnUDPData = aESP01OnUDPData;
+
+	iRXr = 0;
+	iRXw = 0;
+	iTXr = 0;
+	iTXw = 0;
+
+	SSID[0] = '\0';
+	RemotePort[0] = '\0';
 }
 
 uint8_t ESP01SetWIFI(char *aSSID, char *aPASSWORD){
@@ -110,6 +119,9 @@ uint8_t ESP01SetWIFI(char *aSSID, char *aPASSWORD){
 
 uint8_t ESP01ConnectUDP(char *aRemoteIP, uint16_t aRemotePort, uint16_t aLocalPort){
 	char str[5];
+
+	if(lastESP01STATE != ESP01WIFICONNECTED)
+		return 0;
 
 	strncpy(RemoteIP, aRemoteIP, 16);
     RemoteIP[15] = '\0';
@@ -149,7 +161,7 @@ uint8_t ESP01ConnectUDP(char *aRemoteIP, uint16_t aRemotePort, uint16_t aLocalPo
 	LocalPort[j] = '\0';
 
 
-    ESP01TASKSTATE = STESP01ATCLOSE;
+    ESP01TASKSTATE = STESP01ATCLOSE1;
     lastESP01STATE = ESP01UDPBUSY;
 
     return 1;
@@ -161,16 +173,14 @@ void ESP01SetRxByte(uint8_t value){
 		iRXw = 0;
 }
 
-uint8_t ESP01HasByteToTx(){
-	if(WAITINGSYMBOL)
-		return 0;
-	if(iTXr != iTXw)
-		return 1;
-	return 0;
-}
-
 
 uint8_t ESP01GetTxByte(uint8_t *value){
+	if(WAITINGSYMBOL)
+		return 0;
+
+	if(iTXr == iTXw)
+		return 0;
+
 	*value = bufTX[iTXr++];
 	if(iTXr == SIZEBUFTX)
 		iTXr = 0;
@@ -238,8 +248,33 @@ void ESP01Task(){
 }
 
 void ESP01TimeOut10ms(){
-	if(timeOutResponse)
+	if(timeOutResponse){
 		timeOutResponse--;
+		if(timeOutResponse == 0){
+			switch(ESP01TASKSTATE){
+			case STESP01ATCLOSE:
+				ESP01TASKSTATE = STESP01ATCWJAP;
+				break;
+			case STESP01HARDRESET:
+				doESP01GpioWriteCH_EN(1);
+				ESP01TASKSTATE = STESP01ATAT;
+				timeOutResponse = 100;
+				break;
+			case STESP01ATCLOSE1:
+				ESP01TASKSTATE = STESP01ATCIPSTART;
+				break;
+			case STESP01ATAT:
+			case STESP01ATCIPMUX:
+			case STESP01ATCWJAP:
+			case STESP01ATCIPSTART:
+			case STESP01ATCONNECTED:
+			case STESP01ATCWMODE:
+			case STESP01IDLE:
+			case STESP01ATCIFSR:
+				break;
+			}
+		}
+	}
 
 	if(timeOutSymbol){
 		timeOutSymbol--;
@@ -273,7 +308,7 @@ static void ESP01PutAT(const char *atCMD){
 	int i=0;
 
 	while(atCMD[i]){
-		bufTX[iTXw++] = atCMD[i];
+		bufTX[iTXw++] = atCMD[i++];
 		if(iTXw == SIZEBUFTX)
 			iTXw = 0;
 	}
@@ -310,11 +345,6 @@ static void ESP01DoWifi(){
 			timeOutResponse = 10;
 			triesAT = 5;
 		}
-		break;
-	case STESP01HARDRESET:
-		doESP01GpioWriteCH_EN(1);
-		ESP01TASKSTATE = STESP01ATAT;
-		timeOutResponse = 100;
 		break;
 	case STESP01ATCWMODE:
 		ESP01PutAT(_ATCWMODE);
@@ -354,7 +384,13 @@ static void ESP01DoWifi(){
 		ESP01PutAT(_ATCIFSR);
 		timeOutResponse = 10;
 		break;
+	case STESP01ATCLOSE1:
+		ESP01PutAT(_ATCIPCLOSE);
+		timeOutResponse = 10;
+		break;
 	case STESP01ATCIPSTART:
+		if(RemotePort[0] == '\0')
+			break;
 		lastESP01STATE = ESP01UDPBUSY;
 		ESP01PutAT(_ATCIPSTART);
 		ESP01PutByteOnTx('"');
@@ -400,7 +436,8 @@ static uint8_t CmpResponse(const char *str, uint16_t index, uint8_t n){
 		if(str[j] != bufRX[index])
 			return 0;
 		index++;
-		index &= (SIZEBUFRX - 1);
+		if(index == SIZEBUFRX)
+			index = 0;
 	}
 	return 1;
 }
@@ -410,7 +447,6 @@ static void ESP01DecodeAT(){
 	uint16_t index;
 
 	index = iRXw;
-	index &= (SIZEBUFRX - 1);
 
 	while(iRXr != index){
 		switch(header){
@@ -506,10 +542,10 @@ static void ESP01DecodeAT(){
 				if(bufRX[iRXr] == '\n'){
 					header = 0;
 					if(ESP01TASKSTATE  == STESP01ATCIFSR){
-						if(CmpResponse(_CIFSRSTAIP, iResponse, 12) == 1){
-						}
+//						if(CmpResponse(_CIFSRSTAIP, iResponse, 12) == 1){
+//						}
 						if(CmpResponse(_CIFSRSTAMAC, iResponse, 13) == 1){
-							ESP01TASKSTATE = STESP01ATCLOSE;
+							ESP01TASKSTATE = STESP01ATCIPSTART;
 							timeOutResponse = 0;
 							lastESP01STATE = ESP01WIFICONNECTED;
 							triesAT = 0;
@@ -538,8 +574,8 @@ static void ESP01DecodeAT(){
 					header = 0;
 					if(CmpResponse(_OK, iResponse, 2) == 1){
 						if(ESP01TASKSTATE == STESP01ATAT){
-							ESP01TASKSTATE = STESP01ATCWMODE;
 							timeOutResponse = 0;
+							ESP01TASKSTATE = STESP01ATCWMODE;
 						}
 						if(ESP01TASKSTATE == STESP01ATCWMODE){
 							timeOutResponse = 0;
@@ -640,6 +676,10 @@ static void ESP01DecodeAT(){
 			default:
 				header = 0;
 		}
+
+		iRXr++;
+		if(iRXr == SIZEBUFRX)
+			iRXr = 0;
 	}
 }
 

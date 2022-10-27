@@ -43,6 +43,7 @@
 #define LEDESP01DBG			0xEAEAEAEA
 #define LEDWIFIDISCONNECTED	0x0000EE00
 #define LEDWIFICONNECTED	0x0000EEA0
+#define LEDUDPREADY			0x0000EEA8
 
 #define ADCDATASIZE		256
 
@@ -125,6 +126,7 @@ uint8_t GetByteFromRx(_sRx *RX, int8_t pre, int8_t pos);
 void GetBufFromRx(_sRx *RX, uint8_t *buf, int length);
 void DecodeCmd(_sRx *RX, _sTx *TX);
 void Do100ms();
+void ChangeLedStatus(uint32_t aMask, uint32_t aLedStatus);
 
 void ESP01ChEN(uint32_t value);
 void ESP01DatagramReady(uint8_t *buf, uint16_t length);
@@ -397,7 +399,7 @@ void DecodeCmd(_sRx *RX, _sTx *TX){
     switch (RX->buf[RX->iData])
     {
     case 0xA0://READ LAST ANALOG INPUTS
-		ledStatus = LEDIDLE;
+    	ChangeLedStatus(0x0000FFFF, LEDIDLE);
 		w.u8[0] = indexADCData;
 		w.u8[0]--;
 		w.u8[0] &= (ADCDATASIZE - 1);
@@ -421,14 +423,14 @@ void DecodeCmd(_sRx *RX, _sTx *TX){
     		n10msData = w.u8[0];
     		timeOutAnalog = n10msData*40;
     		timeOutAnalogAux = timeOutAnalog;
-    		ledStatus = LEDTXANALOG;
     		stateSendSamples = 0;
     		CONTAVERAGE = 0;
+        	ChangeLedStatus(0x0000FFFF, LEDTXANALOG);
     	}
     	else{
     		timeOutAnalog = 0;
     		timeOutAnalogAux = 0;
-    		ledStatus = LEDIDLE;
+        	ChangeLedStatus(0x0000FFFF, LEDIDLE);
     	}
     	PutHeaderOnTx(TX, 0xA1, 2);
     	PutByteOnTx(TX, 0x0D);
@@ -441,13 +443,13 @@ void DecodeCmd(_sRx *RX, _sTx *TX){
     			w.u8[0] = 10;
     		timeOutAnalog = w.u8[0]*4;
     		timeOutAnalogAux = timeOutAnalog;
-    		ledStatus = LEDTXANALOG;
+        	ChangeLedStatus(0x0000FFFF, LEDTXANALOG);
     		CONTAVERAGE = 1;
     	}
     	else{
     		timeOutAnalog = 0;
     		timeOutAnalogAux = 0;
-    		ledStatus = LEDIDLE;
+        	ChangeLedStatus(0x0000FFFF, LEDIDLE);
     	}
     	PutHeaderOnTx(TX, 0xA2, 2);
     	PutByteOnTx(TX, 0x0D);
@@ -529,7 +531,7 @@ void DecodeCmd(_sRx *RX, _sTx *TX){
     	break;
     case 0xB0://SET transparent ESP01
    		ESP01DEBUG  = 1;
-   		ledStatus = LEDESP01DBG;
+    	ChangeLedStatus(0x0000FFFF, LEDESP01DBG);
    		countPlus = 0;
     	break;
     case 0xB1://SET WIFI SSID and PASSWORD
@@ -627,15 +629,21 @@ void Do100ms(){
 			timeOutSendAlive = 200;
 			TX.cks = 0;
 			PutHeaderOnTx(&TX, 0xF0, 2);
-			PutByteOnTx(&TX, 0x0D);
+			PutByteOnTx(&TX, 0x0E);
 			PutByteOnTx(&TX, TX.cks);
 			TXESP01.cks = 0;
 			PutHeaderOnTx(&TXESP01, 0xF0, 2);
-			PutByteOnTx(&TXESP01, 0x0D);
+			PutByteOnTx(&TXESP01, 0x0F);
 			PutByteOnTx(&TXESP01, TXESP01.cks);
 		}
 	}
 }
+
+void ChangeLedStatus(uint32_t aMask, uint32_t aLedStatus){
+	ledStatus &= aMask;
+	ledStatus |= aLedStatus;
+}
+
 
 
 void ESP01ChEN(uint32_t value){
@@ -649,14 +657,17 @@ void ESP01DatagramReady(uint8_t *buf, uint16_t length){
 
 void ESP01WIFIConnected(){
 	PutStrOntx(&TX, "+&DBGWIFI Connected\n");
+	ChangeLedStatus(0xFFFF0000, LEDWIFICONNECTED);
 }
 
 void ESP01WIFIDisconnected(){
 	PutStrOntx(&TX, "+&DBGWIFI Disconnected\n");
+	ChangeLedStatus(0xFFFF0000, LEDWIFIDISCONNECTED);
 }
 
 void ESP01UDPReady(){
 	PutStrOntx(&TX, "+&DBGUDP Connected\n");
+	ChangeLedStatus(0xFFFF0000, LEDUDPREADY);
 }
 
 
@@ -694,6 +705,7 @@ int main(void)
 
 	timeOut100ms = 10;
 	ledStatus = LEDIDLE;
+	timeOutSendAlive = 200;
 
 	indexADCData = 0;
 	indexADCData10ms -= 40;
@@ -784,6 +796,8 @@ int main(void)
 				  countPlus = 0;
 		  }
 
+		  ESP01TimeOut10ms();
+
 
 	  }
 
@@ -857,15 +871,14 @@ int main(void)
 	  else{
 		  if(TXESP01.iw != TXESP01.ir){
 			  w.u16[0] = TXESP01.iw - TXESP01.ir;
+			  w.u16[0] &= (TXESP01BUFSIZE - 1);
 			  if(ESP01SendUDPData(&TXESP01.buf[TXESP01.ir], w.u16[0], TXESP01BUFSIZE))
 				  TXESP01.iw = TXESP01.ir;
 		  }
 
-		  if(ESP01HasByteToTx()){
-			  if(__HAL_UART_GET_FLAG(&huart3, UART_FLAG_TXE)){
-				  if(ESP01GetTxByte(&w.u8[0]))
-					  huart3.Instance->TDR = w.u8[0];
-			  }
+		  if(__HAL_UART_GET_FLAG(&huart3, UART_FLAG_TXE)){
+			  if(ESP01GetTxByte(&w.u8[0]))
+				  huart3.Instance->TDR = w.u8[0];
 		  }
 	  }
 
